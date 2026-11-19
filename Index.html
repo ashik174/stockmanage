@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock Manager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+  <?!= include('Style'); ?>
+</head>
+<body>
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand"><span class="logo">S</span><span class="brand-t">Stock Manager</span></div>
+      <nav id="nav"></nav>
+    </aside>
+    <div class="scrim" data-act="menu"></div>
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn" data-act="menu" aria-label="Toggle sidebar" id="menu-btn"></button>
+        <h1 id="page-title">Dashboard</h1>
+        <span class="topdate" id="topdate"></span>
+      </header>
+      <main id="content"></main>
+    </div>
+  </div>
+  <div id="toasts" aria-live="polite"></div>
+  <div id="modal-root"></div>
+  <?!= include('JavaScript'); ?>
+</body>
+</html>

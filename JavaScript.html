@@ -1,0 +1,398 @@
+<script>
+(function () {
+'use strict';
+
+/* ---------- constants & state ---------- */
+var ICONS = {
+  dashboard: '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/>',
+  stock: '<path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
+  products: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  IN: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+  OUT: '<path d="M12 21V9M7 14l5-5 5 5M5 3h14"/>',
+  RET: '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 010 10h-4"/>',
+  DMG: '<path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0zM12 9v4M12 17h.01"/>',
+  OTH: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  summary: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+  history: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  menu: '<path d="M3 6h18M3 12h18M3 18h18"/>'
+};
+function svg(n) { return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + ICONS[n] + '</svg>'; }
+var PAGES = [
+  { id: 'dashboard', label: 'Dashboard', sub: 'Live overview of your stock.' },
+  { id: 'stock', label: 'Current Stock', sub: 'Stock of every active product.' },
+  { id: 'products', label: 'Product Management', sub: 'Add, edit and deactivate products.' },
+  { id: 'IN', label: 'Stock In', sub: 'Record stock received. Pick an earlier date to add a missed entry.' },
+  { id: 'OUT', label: 'Outbound', sub: 'Record products sent out.' },
+  { id: 'RET', label: 'Return Product', sub: 'Record products returned to stock.' },
+  { id: 'DMG', label: 'Damage Product', sub: 'Record damaged products removed from stock.' },
+  { id: 'OTH', label: 'Others', sub: 'Record any other reason for stock leaving.' },
+  { id: 'summary', label: 'Stock Summary', sub: 'Closing stock for any date.' },
+  { id: 'history', label: 'Transaction History', sub: 'Search, edit and delete transactions.' }
+];
+var TY = { IN: { label: 'Stock In', sign: 1 }, OUT: { label: 'Outbound', sign: -1, deduct: true }, RET: { label: 'Return', sign: 1 },
+  DMG: { label: 'Damage', sign: -1, deduct: true }, OTH: { label: 'Others', sign: -1, deduct: true } };
+var FORMS = ['IN', 'OUT', 'RET', 'DMG', 'OTH'];
+var S = { products: [], today: '', low: 10, page: 'dashboard', avail: {}, rid: {}, stock: [], hist: { from: '', to: '', pid: '', type: '', q: '', sort: 'desc', page: 1 } };
+
+/* ---------- helpers ---------- */
+function $(s, r) { return (r || document).querySelector(s); }
+function esc(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+function fmt(n) { return Number(n || 0).toLocaleString('en-US'); }
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+function loading() { return '<div class="loading"><span class="spin"></span>Loading…</div>'; }
+function empty(t, s) { return '<div class="empty"><b>' + esc(t) + '</b>' + esc(s || '') + '</div>'; }
+function errBox(m) { return '<div class="errbox">' + esc(m) + '</div>'; }
+function api(name) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  return new Promise(function (res, rej) {
+    var r = google.script.run
+      .withSuccessHandler(function (x) { if (x && x.ok) res(x.data); else rej(new Error((x && x.error) || 'Unknown error')); })
+      .withFailureHandler(function (e) { rej(new Error((e && e.message) || 'Server error. Please try again.')); });
+    r[name].apply(r, args);
+  });
+}
+function toast(msg, type) {
+  var t = document.createElement('div'); t.className = 'toast ' + (type || ''); t.textContent = msg; $('#toasts').appendChild(t);
+  setTimeout(function () { t.remove(); }, type === 'err' ? 6500 : 3800);
+}
+function busy(btn, on, txt) {
+  if (!btn) return;
+  if (on) { btn.dataset.l = btn.textContent; btn.textContent = txt || 'Working…'; btn.disabled = true; }
+  else { btn.textContent = btn.dataset.l || btn.textContent; btn.disabled = false; }
+}
+function table(head, rows) {
+  return '<div class="tbl-wrap"><table><thead><tr>' + head.map(function (h) {
+    return typeof h === 'string' ? '<th>' + h + '</th>' : '<th class="num">' + h[0] + '</th>';
+  }).join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
+}
+function field(label, ctl) { return '<div class="fld"><label>' + label + '</label>' + ctl + '</div>'; }
+function modal(title, body, wide) {
+  $('#modal-root').innerHTML = '<div class="overlay"><div class="modal' + (wide ? ' wide' : '') + '" role="dialog"><div class="mhead"><h3>' + title +
+    '</h3><button class="icon-btn" data-act="mclose" aria-label="Close">&times;</button></div><div class="mbody">' + body + '</div></div></div>';
+}
+function closeModal() { $('#modal-root').innerHTML = ''; }
+function signed(e) { return '<span class="' + (e.sign > 0 ? 'pos' : 'neg') + '">' + (e.sign > 0 ? '+' : '−') + fmt(e.qty) + '</span>'; }
+function prodOptions(sel, keep, all) {
+  var h = '<option value="">Select product…</option>';
+  S.products.forEach(function (p) {
+    if (all || p.status === 'Active' || p.id === keep) h += '<option value="' + esc(p.id) + '"' + (p.id === sel ? ' selected' : '') + '>' + esc(p.name) + (p.status !== 'Active' ? ' (inactive)' : '') + '</option>';
+  });
+  return h;
+}
+function activeProduct(id) { return S.products.filter(function (p) { return p.id === id; })[0]; }
+
+/* ---------- init & navigation ---------- */
+function init() {
+  $('#menu-btn').innerHTML = svg('menu');
+  $('#nav').innerHTML = PAGES.map(function (p) {
+    return '<button class="nav-i" data-act="go" data-p="' + p.id + '" id="nav-' + p.id + '">' + svg(ICONS[p.id] ? p.id : 'stock') + '<span class="nav-t">' + p.label + '</span></button>';
+  }).join('');
+  $('#content').innerHTML = PAGES.map(function (p) { return '<section class="page" id="pg-' + p.id + '" hidden></section>'; }).join('');
+  api('getInitData').then(function (d) {
+    S.products = d.products; S.today = d.today; S.low = d.lowStock; $('#topdate').textContent = 'Today: ' + S.today;
+    FORMS.forEach(function (t) { S.rid[t] = uid(); renderTxnPage(t); });
+    go('dashboard');
+  }).catch(function (e) { $('#content').innerHTML = errBox(e.message); $('#content').hidden = false; });
+}
+function head(p) { return '<div class="page-head"><h2>' + p.label + '</h2><p>' + p.sub + '</p></div>'; }
+function go(id) {
+  S.page = id;
+  PAGES.forEach(function (p) { $('#pg-' + p.id).hidden = p.id !== id; $('#nav-' + p.id).classList.toggle('active', p.id === id); if (p.id === id) $('#page-title').textContent = p.label; });
+  $('#sidebar').classList.remove('open'); document.querySelector('.scrim').classList.remove('show');
+  var L = { dashboard: loadDashboard, stock: loadStock, products: loadProducts, summary: loadSummary, history: loadHistory };
+  if (L[id]) L[id](); else if (TY[id]) { refreshProductSelects(); loadRecent(id); }
+}
+function reloadAll() { return api('getInitData').then(function (d) { S.products = d.products; S.today = d.today; refreshProductSelects(); go(S.page); }); }
+function refreshProducts() { return api('getInitData').then(function (d) { S.products = d.products; refreshProductSelects(); }); }
+function refreshProductSelects() {
+  FORMS.forEach(function (t) { var s = $('#f-' + t + ' [name=pid]'); if (s) { var v = s.value; s.innerHTML = prodOptions(v); } });
+  var hp = $('#h-pid'); if (hp) { var v = hp.value; hp.innerHTML = prodOptions(v, '', true).replace('Select product…', 'All products'); }
+}
+
+/* ---------- dashboard ---------- */
+function cards(items) {
+  return '<div class="cards">' + items.map(function (i) { return '<div class="card stat' + (i[2] ? ' gold' : '') + '"><span class="lbl">' + i[0] + '</span><span class="val">' + fmt(i[1]) + '</span></div>'; }).join('') + '</div>';
+}
+function loadDashboard() {
+  var el = $('#pg-dashboard');
+  if (!el.dataset.init) {
+    el.dataset.init = 1;
+    el.innerHTML = head(PAGES[0]) + '<div class="toolbar"><label class="inline">Date <input type="date" id="dash-date" max="' + S.today + '" value="' + S.today + '" data-chg="dash"></label>' +
+      '<button class="btn" data-act="refresh">Refresh</button><button class="btn" data-act="reconcile">Reconcile stock</button></div><div id="dash-body"></div>';
+  }
+  var date = $('#dash-date').value || S.today; $('#dash-body').innerHTML = loading();
+  api('getDashboard', date).then(function (d) {
+    var t = d.totals, lab = d.date === S.today ? "Today's" : d.date;
+    var maxV = Math.max.apply(null, [1].concat(d.movement.map(function (m) { return Math.max(m.in, m.out); })));
+    var h = cards([['Total Products', d.totalProducts], ['Current Stock', d.totalStock, 1], [lab + ' Stock In', t.in], [lab + ' Outbound', t.out], [lab + ' Return', t.ret], [lab + ' Damage', t.dmg], [lab + ' Others', t.oth]]);
+    h += '<div class="grid-p"><div class="card"><h3>Recent Transactions</h3>' + (d.recent.length ? table(['Date', 'ID', 'Product', 'Type', ['Qty']], d.recent.map(function (e) {
+      return '<tr><td>' + esc(e.date) + (e.backdated ? '<span class="badge gold">Backdated</span>' : '') + '</td><td class="mut">' + esc(e.id) + '</td><td>' + esc(e.pname) + '</td><td>' + esc(e.typeLabel) + '</td><td class="num">' + signed(e) + '</td></tr>';
+    })) : empty('No transactions yet', 'Entries you submit will appear here.')) + '</div>';
+    h += '<div class="card"><h3>Low Stock Products <span class="badge">≤ ' + d.lowLimit + '</span></h3>' + (d.low.length ? d.low.map(function (x) {
+      return '<div class="lowrow"><span>' + esc(x.name) + '</span><b class="' + (x.current === 0 ? 'neg' : '') + '">' + fmt(x.current) + '</b></div>';
+    }).join('') : empty('All products are above the low-stock limit')) + '</div>';
+    h += '<div class="card"><h3>Stock Movement (7 days to ' + esc(d.date) + ')</h3><div class="mov">' + d.movement.map(function (m) {
+      return '<div class="d"><div class="bars"><div class="b i" style="height:' + Math.round(m.in / maxV * 100) + '%" title="In: ' + m.in + '"></div><div class="b o" style="height:' + Math.round(m.out / maxV * 100) + '%" title="Out: ' + m.out + '"></div></div><small>' + esc(m.date.slice(5)) + '</small></div>';
+    }).join('') + '</div><div class="legend"><span><i style="background:var(--gold)"></i>In (Stock In + Return)</span><span><i style="background:var(--gray)"></i>Out (Outbound + Damage + Others)</span></div></div>';
+    h += '<div class="card"><h3>Date-wise Summary — ' + esc(d.date) + '</h3>' + table(['Item', ['Quantity']], [['Total Previous Stock', t.prev], ['Total Stock In', t.in], ['Total Outbound', t.out], ['Total Return', t.ret], ['Total Damage', t.dmg], ['Total Others', t.oth], ['Total Closing Stock', t.close]].map(function (r) {
+      return '<tr><td>' + r[0] + '</td><td class="num">' + fmt(r[1]) + '</td></tr>';
+    })) + '</div></div>';
+    $('#dash-body').innerHTML = h;
+  }).catch(function (e) { $('#dash-body').innerHTML = errBox(e.message); });
+}
+
+/* ---------- current stock ---------- */
+function loadStock() {
+  var el = $('#pg-stock');
+  if (!el.dataset.init) {
+    el.dataset.init = 1;
+    el.innerHTML = head(PAGES[1]) + '<div class="toolbar"><input class="grow" id="st-q" placeholder="Search product…" data-inp="stock"><select id="st-cat" data-chg="stock"><option value="">All categories</option></select>' +
+      '<select id="st-sort" data-chg="stock"><option value="name">Sort: Product name</option><option value="low">Sort: Current stock (low → high)</option><option value="high">Sort: Current stock (high → low)</option></select></div><div id="st-body"></div>';
+  }
+  $('#st-body').innerHTML = loading();
+  api('getCurrentStock').then(function (rows) { S.stock = rows; renderStock(); }).catch(function (e) { $('#st-body').innerHTML = errBox(e.message); });
+}
+function renderStock() {
+  var q = $('#st-q').value.trim().toLowerCase(), cat = $('#st-cat').value, sort = $('#st-sort').value;
+  var cats = {}; S.stock.forEach(function (r) { if (r.category) cats[r.category] = 1; });
+  var cs = $('#st-cat'); cs.innerHTML = '<option value="">All categories</option>' + Object.keys(cats).sort().map(function (c) { return '<option' + (c === cat ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('');
+  var rows = S.stock.filter(function (r) { return (!q || r.name.toLowerCase().indexOf(q) >= 0) && (!cat || r.category === cat); });
+  rows.sort(function (a, b) { return sort === 'low' ? a.current - b.current : sort === 'high' ? b.current - a.current : a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1; });
+  $('#st-body').innerHTML = rows.length ? table(['Product Name', ['Opening Stock'], ['Total Stock In'], ['Total Outbound'], ['Total Return'], ['Total Damage'], ['Total Others'], ['Current Stock'], ''], rows.map(function (r) {
+    var flag = r.current === 0 ? '<span class="badge red">Out of stock</span>' : r.current <= S.low ? '<span class="badge gold">Low</span>' : '';
+    return '<tr><td>' + esc(r.name) + flag + '</td><td class="num">' + fmt(r.opening) + '</td><td class="num">' + fmt(r.in) + '</td><td class="num">' + fmt(r.out) + '</td><td class="num">' + fmt(r.ret) + '</td><td class="num">' + fmt(r.dmg) + '</td><td class="num">' + fmt(r.oth) + '</td><td class="num"><b>' + fmt(r.current) + '</b></td><td><button class="btn sm" data-act="pdetail" data-id="' + esc(r.id) + '">Details</button></td></tr>';
+  })) : empty('No products found', 'Add a product in Product Management or change the filters.');
+}
+
+/* ---------- products ---------- */
+function loadProducts() {
+  var el = $('#pg-products');
+  if (!el.dataset.init) {
+    el.dataset.init = 1;
+    el.innerHTML = head(PAGES[2]) + '<div class="toolbar"><input class="grow" id="pr-q" placeholder="Search product, category or ID…" data-inp="prod"><button class="btn primary" data-act="padd">Add Product</button></div><div id="pr-body"></div>';
+  }
+  $('#pr-body').innerHTML = loading();
+  refreshProducts().then(renderProducts).catch(function (e) { $('#pr-body').innerHTML = errBox(e.message); });
+}
+function renderProducts() {
+  var q = $('#pr-q').value.trim().toLowerCase();
+  var rows = S.products.filter(function (p) { return !q || (p.name + ' ' + p.category + ' ' + p.id).toLowerCase().indexOf(q) >= 0; });
+  $('#pr-body').innerHTML = rows.length ? table(['ID', 'Product Name', 'Category', ['Opening'], ['Current'], 'Status', 'Created', ''], rows.map(function (p) {
+    return '<tr><td class="mut">' + esc(p.id) + '</td><td>' + esc(p.name) + '</td><td class="mut">' + esc(p.category || '—') + '</td><td class="num">' + fmt(p.opening) + '</td><td class="num"><b>' + fmt(p.current) + '</b></td><td><span class="badge ' + (p.status === 'Active' ? 'green' : 'red') + '">' + p.status + '</span></td><td class="mut">' + esc(p.created.slice(0, 10)) + '</td><td><div class="act">' +
+      '<button class="btn sm" data-act="pdetail" data-id="' + esc(p.id) + '">View</button><button class="btn sm" data-act="pedit" data-id="' + esc(p.id) + '">Edit</button>' +
+      '<button class="btn sm ' + (p.status === 'Active' ? 'danger' : '') + '" data-act="ptoggle" data-id="' + esc(p.id) + '">' + (p.status === 'Active' ? 'Deactivate' : 'Activate') + '</button></div></td></tr>';
+  })) : empty('No products yet', 'Use "Add Product" to create your first product.');
+}
+function productModal(id) {
+  var p = id ? activeProduct(id) : null, cats = {};
+  S.products.forEach(function (x) { if (x.category) cats[x.category] = 1; });
+  modal(p ? 'Edit Product' : 'Add Product', '<form class="form" data-form="pm" novalidate><input type="hidden" name="id" value="' + esc(p ? p.id : '') + '">' +
+    field('Product Name', '<input name="name" maxlength="100" required value="' + esc(p ? p.name : '') + '" data-inp="pmname">') + '<div class="warn" id="pm-warn"></div>' +
+    field('Category (optional)', '<input name="category" list="cat-list" maxlength="60" value="' + esc(p ? p.category : '') + '"><datalist id="cat-list">' + Object.keys(cats).map(function (c) { return '<option value="' + esc(c) + '">'; }).join('') + '</datalist>') +
+    field('Opening Stock', '<input name="opening" type="number" min="0" step="1" value="' + (p ? p.opening : 0) + '">') +
+    (p ? field('Status', '<select name="status"><option' + (p.status === 'Active' ? ' selected' : '') + '>Active</option><option' + (p.status === 'Inactive' ? ' selected' : '') + '>Inactive</option></select>') : '') +
+    '<div class="mfoot"><button type="button" class="btn" data-act="mclose">Cancel</button><button class="btn primary" type="submit">' + (p ? 'Save changes' : 'Add product') + '</button></div></form>');
+}
+function productDetails(id) {
+  modal('Product Details', loading(), true);
+  api('getProductDetails', id).then(function (d) {
+    var p = d.product, t = d.totals;
+    $('#modal-root .mbody').innerHTML = '<h3 style="margin-bottom:4px">' + esc(p.name) + ' <span class="badge ' + (p.status === 'Active' ? 'green' : 'red') + '">' + p.status + '</span></h3><p class="hint">' + esc(p.id) + ' · ' + esc(p.category || 'No category') + ' · Created ' + esc(p.created) + '</p>' +
+      '<div class="kv"><div><span>Opening</span><b>' + fmt(p.opening) + '</b></div><div><span>Stock In</span><b>' + fmt(t.in) + '</b></div><div><span>Outbound</span><b>' + fmt(t.out) + '</b></div><div><span>Return</span><b>' + fmt(t.ret) + '</b></div><div><span>Damage</span><b>' + fmt(t.dmg) + '</b></div><div><span>Others</span><b>' + fmt(t.oth) + '</b></div><div><span>Current Stock</span><b style="color:var(--gold)">' + fmt(p.current) + '</b></div></div>' +
+      '<h3 style="margin:6px 0 10px">Stock history (latest 100)</h3>' + (d.history.length ? table(['Date', 'ID', 'Type', ['Qty'], ['Balance'], 'Note'], d.history.map(function (e) {
+        return '<tr><td>' + esc(e.date) + (e.backdated ? '<span class="badge gold">Backdated</span>' : '') + '</td><td class="mut">' + esc(e.id) + '</td><td>' + esc(e.typeLabel) + '</td><td class="num">' + signed(e) + '</td><td class="num">' + fmt(e.balance) + '</td><td class="mut wrap">' + esc(e.note) + '</td></tr>';
+      })) : empty('No transactions for this product yet'));
+  }).catch(function (e) { $('#modal-root .mbody').innerHTML = errBox(e.message); });
+}
+
+/* ---------- transaction forms ---------- */
+function renderTxnPage(type) {
+  var T = TY[type], p = PAGES.filter(function (x) { return x.id === type; })[0];
+  $('#pg-' + type).innerHTML = head(p) + '<div class="grid-2"><form class="card form" id="f-' + type + '" data-form="' + type + '" novalidate><h3>' + T.label + ' Entry</h3>' +
+    field('Transaction Date', '<input type="date" name="date" max="' + S.today + '" value="' + S.today + '" data-chg="avail" required>') +
+    field('Select Product', '<select name="pid" data-chg="avail" required>' + prodOptions('') + '</select>') + '<div class="info" id="info-' + type + '"></div>' +
+    field('Quantity', '<input type="number" name="qty" min="1" step="1" inputmode="numeric" required>') +
+    (type === 'OTH' ? field('Reason', '<input name="reason" maxlength="200" required>') : '') +
+    field(type === 'DMG' ? 'Reason / Note' : 'Note (optional)', '<textarea name="note" rows="2" maxlength="500"></textarea>') +
+    '<button class="btn primary" type="submit">Submit ' + T.label + '</button></form><div class="card"><h3>Recent ' + T.label + ' entries</h3><div id="recent-' + type + '"></div></div></div>';
+}
+var availTimer = {};
+function updateAvail(type) {
+  clearTimeout(availTimer[type]);
+  availTimer[type] = setTimeout(function () {
+    var f = $('#f-' + type), pid = f.elements.pid.value, date = f.elements.date.value, info = $('#info-' + type);
+    if (!pid || !date) { info.textContent = ''; S.avail[type] = null; return; }
+    api('getAvailableStock', pid, date, '').then(function (a) {
+      S.avail[type] = a.available;
+      info.innerHTML = 'Current stock: <b>' + fmt(a.current) + '</b>' + (TY[type].deduct ? ' · Available on ' + esc(date) + ': <b>' + fmt(a.available) + '</b>' : '');
+    }).catch(function (e) { info.textContent = e.message; });
+  }, 150);
+}
+function loadRecent(type) {
+  var box = $('#recent-' + type); box.innerHTML = loading();
+  api('getTransactions', { type: type, page: 1, pageSize: 8, sort: 'desc' }).then(function (r) {
+    box.innerHTML = r.rows.length ? table(['Date', 'ID', 'Product', ['Qty']], r.rows.map(function (e) {
+      return '<tr><td>' + esc(e.date) + (e.backdated ? '<span class="badge gold">Backdated</span>' : '') + '</td><td class="mut">' + esc(e.id) + '</td><td>' + esc(e.pname) + '</td><td class="num">' + signed(e) + '</td></tr>';
+    })) : empty('No entries yet', 'Your submissions will appear here.');
+  }).catch(function (e) { box.innerHTML = errBox(e.message); });
+}
+function submitTxn(f) {
+  var type = f.dataset.form, T = TY[type], el = f.elements, date = el.date.value, pid = el.pid.value, qty = Number(el.qty.value), err = '';
+  if (!date) err = 'Choose a date.'; else if (date > S.today) err = 'Future dates are not allowed.'; else if (!pid) err = 'Select a product.';
+  else if (!(qty > 0) || Math.floor(qty) !== qty) err = 'Quantity must be a positive whole number.';
+  else if (type === 'OTH' && !el.reason.value.trim()) err = 'Reason is required.';
+  else if (T.deduct && S.avail[type] != null && qty > S.avail[type]) err = 'Quantity is more than the stock available on ' + date + ' (' + fmt(S.avail[type]) + ').';
+  if (err) { toast(err, 'err'); return; }
+  var btn = $('button[type=submit]', f); busy(btn, true, 'Submitting…');
+  api('addTransaction', { type: type, date: date, pid: pid, qty: qty, note: el.note.value, reason: el.reason ? el.reason.value : '', requestId: S.rid[type] }).then(function (r) {
+    toast(T.label + ' saved (' + r.id + ')' + (r.backdated ? ' — backdated entry, history recalculated' : ''));
+    f.reset(); el.date.value = S.today; S.rid[type] = uid(); S.avail[type] = null; $('#info-' + type).textContent = '';
+    return refreshProducts().then(function () { loadRecent(type); });
+  }).catch(function (e) { toast(e.message, 'err'); }).then(function () { busy(btn, false); });
+}
+
+/* ---------- summary ---------- */
+function loadSummary() {
+  var el = $('#pg-summary');
+  if (!el.dataset.init) {
+    el.dataset.init = 1;
+    el.innerHTML = head(PAGES[8]) + '<div class="toolbar"><label class="inline">Date <input type="date" id="sm-date" max="' + S.today + '" value="' + S.today + '" data-chg="summary"></label></div><div id="sm-body"></div>';
+  }
+  var d = $('#sm-date').value || S.today; $('#sm-body').innerHTML = loading();
+  api('getStockSummary', d).then(function (r) {
+    var t = r.totals;
+    var h = cards([['Total Previous Stock', t.prev], ['Total Stock In', t.in], ['Total Outbound', t.out], ['Total Return', t.ret], ['Total Damage', t.dmg], ['Total Others', t.oth], ['Total Closing Stock', t.close, 1]]);
+    h += r.rows.length ? table(['Product', ['Previous Stock'], ['Stock In'], ['Outbound'], ['Return'], ['Damage'], ['Others'], ['Closing Stock']], r.rows.map(function (x) {
+      return '<tr><td>' + esc(x.name) + (x.status !== 'Active' ? '<span class="badge red">Inactive</span>' : '') + '</td><td class="num">' + fmt(x.prev) + '</td><td class="num">' + fmt(x.in) + '</td><td class="num">' + fmt(x.out) + '</td><td class="num">' + fmt(x.ret) + '</td><td class="num">' + fmt(x.dmg) + '</td><td class="num">' + fmt(x.oth) + '</td><td class="num"><b>' + fmt(x.close) + '</b></td></tr>';
+    })) : empty('No products', 'Add products to see the daily summary.');
+    $('#sm-body').innerHTML = h;
+  }).catch(function (e) { $('#sm-body').innerHTML = errBox(e.message); });
+}
+
+/* ---------- history ---------- */
+function loadHistory() {
+  var el = $('#pg-history');
+  if (!el.dataset.init) {
+    el.dataset.init = 1;
+    el.innerHTML = head(PAGES[9]) + '<div class="card"><div class="filters"><div class="fld"><label>From</label><input type="date" id="h-from" data-chg="hist"></label><div class="fld"><label>To</label><input type="date" id="h-to" data-chg="hist"></label>' +
+      '<div class="fld"><label>Product</label><select id="h-pid" data-chg="hist"></select></label><div class="fld"><label>Type</label><select id="h-type" data-chg="hist"><option value="">All types</option>' +
+      FORMS.map(function (t) { return '<option value="' + t + '">' + TY[t].label + '</option>'; }).join('') + '</select></label>' +
+      '<div class="fld"><label>Transaction ID</label><input id="h-q" placeholder="e.g. OUT-000012" data-inp="hist"></label><button class="btn" data-act="hsort" id="h-sort">Date: newest first</button><button class="btn" data-act="hclear">Clear</button></div><div id="h-body"></div></div>';
+    refreshProductSelects();
+  }
+  loadHistoryData();
+}
+function loadHistoryData() {
+  var h = S.hist; h.from = $('#h-from').value; h.to = $('#h-to').value; h.pid = $('#h-pid').value; h.type = $('#h-type').value; h.q = $('#h-q').value;
+  $('#h-body').innerHTML = loading();
+  api('getTransactions', { from: h.from, to: h.to, pid: h.pid, type: h.type, q: h.q, sort: h.sort, page: h.page, pageSize: 20 }).then(function (r) {
+    h.page = r.page;
+    $('#h-body').innerHTML = r.rows.length ? table(['Date', 'Transaction ID', 'Product', 'Type', ['Qty'], ['Balance'], 'Note', 'Submitted At', ''], r.rows.map(function (e) {
+      return '<tr><td>' + esc(e.date) + (e.backdated ? '<span class="badge gold">Backdated</span>' : '') + '</td><td class="mut">' + esc(e.id) + (e.updated ? '<span class="badge">Edited</span>' : '') + '</td><td>' + esc(e.pname) + '</td><td>' + esc(e.typeLabel) + '</td><td class="num">' + signed(e) + '</td><td class="num">' + fmt(e.balance) + '</td><td class="mut wrap">' + esc(e.note) + '</td><td class="mut">' + esc(e.submitted) + '</td><td><div class="act"><button class="btn sm" data-act="tedit" data-id="' + esc(e.id) + '">Edit</button><button class="btn sm danger" data-act="tdel" data-id="' + esc(e.id) + '">Delete</button></div></td></tr>';
+    })) + '<div class="pager"><span>' + r.total + ' transactions · Page ' + r.page + ' of ' + r.pages + '</span><button class="btn sm" data-act="hpage" data-p="' + (r.page - 1) + '"' + (r.page <= 1 ? ' disabled' : '') + '>Previous</button><button class="btn sm" data-act="hpage" data-p="' + (r.page + 1) + '"' + (r.page >= r.pages ? ' disabled' : '') + '>Next</button></div>'
+      : empty('No transactions found', 'Try a different date range or filter.');
+  }).catch(function (e) { $('#h-body').innerHTML = errBox(e.message); });
+}
+function editTxn(id) {
+  modal('Edit Transaction', loading());
+  api('getTransaction', id).then(function (e) {
+    $('#modal-root .mbody').innerHTML = '<form class="form" data-form="et" novalidate><input type="hidden" name="id" value="' + esc(e.id) + '"><p class="hint">' + esc(e.id) + ' · ' + esc(e.typeLabel) + ' · Original submission time (' + esc(e.submitted) + ') is kept.</p>' +
+      field('Transaction Date', '<input type="date" name="date" max="' + S.today + '" value="' + esc(e.date) + '" required>') +
+      field('Product', '<select name="pid">' + prodOptions(e.pid, e.pid) + '</select>') +
+      field('Quantity', '<input type="number" name="qty" min="1" step="1" value="' + e.qty + '" required>') +
+      (e.type === 'OTH' ? field('Reason', '<input name="reason" maxlength="200" value="' + esc(e.reason) + '" required>') : '') +
+      field('Note', '<textarea name="note" rows="2" maxlength="500">' + esc(e.note) + '</textarea>') +
+      '<div class="mfoot"><button type="button" class="btn" data-act="mclose">Cancel</button><button class="btn primary" type="submit">Save changes</button></div></form>';
+  }).catch(function (x) { $('#modal-root .mbody').innerHTML = errBox(x.message); });
+}
+function delTxn(id) {
+  modal('Delete Transaction', loading());
+  api('getTransaction', id).then(function (e) {
+    $('#modal-root .mbody').innerHTML = '<p>Delete <b>' + esc(e.id) + '</b> (' + esc(e.typeLabel) + ' · ' + esc(e.pname) + ' · ' + fmt(e.qty) + ' on ' + esc(e.date) + ')?</p><p class="hint">Stock and all later balances will be recalculated. This cannot be undone.</p>' +
+      '<div class="mfoot"><button class="btn" data-act="mclose">Cancel</button><button class="btn danger fill" data-act="tdelok" data-id="' + esc(e.id) + '">Delete transaction</button></div>';
+  }).catch(function (x) { $('#modal-root .mbody').innerHTML = errBox(x.message); });
+}
+
+/* ---------- event delegation ---------- */
+var ACT = {
+  go: function (d) { go(d.p); },
+  menu: function () {
+    if (window.innerWidth <= 860) { var o = $('#sidebar').classList.toggle('open'); document.querySelector('.scrim').classList.toggle('show', o); }
+    else $('#sidebar').classList.toggle('collapsed');
+  },
+  mclose: closeModal,
+  refresh: function () { reloadAll(); },
+  reconcile: function (d, b) {
+    busy(b, true, 'Reconciling…');
+    api('reconcileStock').then(function (r) {
+      toast('Checked ' + r.checked + ' products. Corrected ' + r.fixed.length + '.' + (r.warning ? ' Warning: ' + r.warning : ''), r.warning ? 'err' : '');
+      return reloadAll();
+    }).catch(function (e) { toast(e.message, 'err'); }).then(function () { busy(b, false); });
+  },
+  padd: function () { productModal(''); },
+  pedit: function (d) { productModal(d.id); },
+  pdetail: function (d) { productDetails(d.id); },
+  ptoggle: function (d, b) {
+    var p = activeProduct(d.id), to = p.status === 'Active' ? 'Inactive' : 'Active';
+    busy(b, true, '…');
+    api('setProductStatus', d.id, to).then(function () { toast(p.name + ' is now ' + to.toLowerCase() + '.'); return refreshProducts().then(renderProducts); })
+      .catch(function (e) { toast(e.message, 'err'); busy(b, false); });
+  },
+  hsort: function (d, b) { S.hist.sort = S.hist.sort === 'desc' ? 'asc' : 'desc'; b.textContent = 'Date: ' + (S.hist.sort === 'desc' ? 'newest first' : 'oldest first'); S.hist.page = 1; loadHistoryData(); },
+  hclear: function () { ['h-from', 'h-to', 'h-pid', 'h-type', 'h-q'].forEach(function (i) { $('#' + i).value = ''; }); S.hist.page = 1; loadHistoryData(); },
+  hpage: function (d) { S.hist.page = Number(d.p); loadHistoryData(); },
+  tedit: function (d) { editTxn(d.id); },
+  tdel: function (d) { delTxn(d.id); },
+  tdelok: function (d, b) {
+    busy(b, true, 'Deleting…');
+    api('deleteTransaction', d.id).then(function () { closeModal(); toast('Transaction deleted. Balances recalculated.'); return refreshProducts().then(loadHistoryData); })
+      .catch(function (e) { toast(e.message, 'err'); busy(b, false); });
+  }
+};
+document.addEventListener('click', function (e) {
+  if (e.target.classList && e.target.classList.contains('overlay')) { closeModal(); return; }
+  var t = e.target.closest('[data-act]'); if (!t || !ACT[t.dataset.act]) return;
+  ACT[t.dataset.act](t.dataset, t);
+});
+document.addEventListener('change', function (e) {
+  var c = e.target.dataset && e.target.dataset.chg; if (!c) return;
+  if (c === 'avail') updateAvail(e.target.form.dataset.form);
+  else if (c === 'dash') loadDashboard(); else if (c === 'summary') loadSummary();
+  else if (c === 'stock') renderStock(); else if (c === 'hist') { S.hist.page = 1; loadHistoryData(); }
+});
+var inpTimer;
+document.addEventListener('input', function (e) {
+  var c = e.target.dataset && e.target.dataset.inp; if (!c) return;
+  if (c === 'stock') renderStock(); else if (c === 'prod') renderProducts();
+  else if (c === 'pmname') {
+    var n = e.target.value.trim().toLowerCase(), id = e.target.form.elements.id.value;
+    var dup = S.products.some(function (p) { return p.id !== id && p.name.toLowerCase() === n && n; });
+    $('#pm-warn').textContent = dup ? 'A product with this name already exists.' : '';
+  } else if (c === 'hist') { clearTimeout(inpTimer); inpTimer = setTimeout(function () { S.hist.page = 1; loadHistoryData(); }, 350); }
+});
+document.addEventListener('submit', function (e) {
+  var f = e.target, k = f.dataset.form; if (!k) return; e.preventDefault();
+  var btn = $('button[type=submit]', f), el = f.elements;
+  if (TY[k]) { submitTxn(f); return; }
+  if (k === 'pm') {
+    if (!el.name.value.trim()) { toast('Product name is required.', 'err'); return; }
+    var op = el.opening.value === '' ? 0 : Number(el.opening.value);
+    if (!(op >= 0) || Math.floor(op) !== op) { toast('Opening stock must be a whole number, 0 or more.', 'err'); return; }
+    busy(btn, true, 'Saving…');
+    api('saveProduct', { id: el.id.value, name: el.name.value, category: el.category.value, opening: op, status: el.status ? el.status.value : '' }).then(function () {
+      closeModal(); toast('Product saved.'); return refreshProducts().then(function () { if (S.page === 'products') renderProducts(); });
+    }).catch(function (x) { toast(x.message, 'err'); busy(btn, false); });
+  } else if (k === 'et') {
+    var q = Number(el.qty.value);
+    if (!el.date.value || !(q > 0) || Math.floor(q) !== q) { toast('Enter a valid date and a positive whole quantity.', 'err'); return; }
+    busy(btn, true, 'Saving…');
+    api('updateTransaction', { id: el.id.value, date: el.date.value, pid: el.pid.value, qty: q, note: el.note.value, reason: el.reason ? el.reason.value : '' }).then(function () {
+      closeModal(); toast('Transaction updated. Balances recalculated.'); return refreshProducts().then(loadHistoryData);
+    }).catch(function (x) { toast(x.message, 'err'); busy(btn, false); });
+  }
+});
+document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
+
+init();
+})();
+</script>
